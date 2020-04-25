@@ -1,0 +1,378 @@
+---
+title: "Ponies: Part IV"
+subtitle: "Exploring the Data, Cleaning the Crap"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+
+
+# Introduction
+
+Now that we have some data, we can finally start to have some fun.
+
+There are three maxims I always teach my data science students:  
+* All your data is crap  
+* Using just one number is a lie  
+* If it is not reproducible, you haven't done anything.  
+
+Ok, I will elaborate a bit on the first one, and talk about the other ones in later posts.
+
+All your data is crap. All data has warts, inaccuracies, missing values, weird codings, etc. It doesn't matter where you are, who your work for, how clean they claim the data is. There are always issues. I have worked in large and small companies where that is the case. I have colleagues who work at consulting companies and go into other businesses to help with their data science who agree. Crappy data is a universal fact.
+
+This has a few implications:  
+* If you think your data is perfect, you probably have not looked hard enough.  
+* When you find the crappiness, it is an opportunity to change how the data got crappy at the source and make things better.  
+* You will never expunge all the crappiness, and it is a significant part of the data scientists job to assess  the impact of any remaining data crappiness on the results being presented and their effect on any actions to be taken.  
+
+I am telling you this now because we will look at the data, and even though we we were pretty careful with extracting the data from the raw html, some weirdness remains.
+
+
+# A note to the reader
+
+The best way to learn data science is to _do_ data science. So run this code. If there are bits you do not understand,run it line by line. Look up the functions you do not know. Change their parameters and see what happens. Don't be afraid to experiment.
+
+# Let's play!
+
+
+First we load the required libraries. I am a huge fan of the tidyverse of packages - they save a lot of time and fit how my brain thinks. In (almost) every case where there is a base-R equivalent the tidyverse version works better. So, for example we will use read_csv rather than read.csv. Best [intro to the tidyverse?](https://r4ds.had.co.nz/)
+
+If you are unfamiliar with skimr, you'll see how it works in a second. You will want to install it, as it is great.
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(ggridges)
+```
+
+We'll load the data
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names()
+```
+
+You may have noticed the clean_names. It is a function in the janitor package that you will want to use. All the data files you get will have different conventions for field names, camelCase, snake_case, WeirdVariations_of_These, etc. Clean_names converts them all to a common format, so that you never have to stop and think about the convention being used. It sounds like a minor thing, but is extremely convenient. So I always do it, even if it may not be needed.
+
+When encountering a new data set the first thing I always to is glimpse it, just to make sure everything loaded properly, and so I can get a sense of what is in it.
+
+```{r}
+df %>% glimpse()
+```
+
+We see that there are about 14k records, and eleven columns. It is always worthwhile to check the column types in case any conversions are needed. Frequently date columns are in some weird format and require work, but here everything looks good.
+
+In a perfect world we'd have a data dictionary that says what each column means, what legal values are, etc. Alas, our world is not perfect. But here is a some info about the data. There is one record per horse per race.  
+- racenum: the number of the race on that day  
+- pos: where the horse finished, i..e 1,2, 3,...  
+- hnum: the number on the horse's saddle. Also an indication of his position in the starting gate  
+- finalOdds: at post time, an indication of how much money was bet on the horse, and therefore the public's belief of the horse's chances of winning  
+- temp: the temperature at the track (usually) or some nearby weather station in degrees Celsius  
+- cond: the track conditions during the race  
+- finish_time: the amount of time it took the horse to finish the race in seconds  
+- date: when the race took place  
+- hname: the name of the horse  
+- jockey: the name of the jockey  
+- trainer: the name of the trainer  
+
+Next, we skim:
+```{r}
+df %>% skim()
+```
+
+Before skimr existed, I'd do counts and summaries on every column, histograms of the numeric ones, etc, always looking for problems. Skimr takes care of that for you. Everything looks reasonable, so we proceed. There are many ways this could go, usually you end up looking at a couple plots, find something weird, investigate, fix ti, and then start over. We will abbreviate this process a bit.
+
+For me the simplest approach is to ask questions of the data set - interrogate it.
+
+How many races did each horse run? Ne the 'sort=TRUE' token gives us the data in order, sorted from most to least.
+
+```{r}
+df %>% count(hname, sort = TRUE)
+```
+
+How many races did each horse win?
+
+```{r}
+df %>%
+  count(hname, pos, sort = TRUE) %>%
+  filter(pos == 1)
+```
+
+Junior must be pretty good, as he won 25 races. But, what if he ran, like 500 races? then the fraction of races he won would be pretty low. Lets check that.
+
+What horses won the highest fraction of races they entered?
+
+```{r}
+df %>%
+  count(hname) %>%
+  left_join(
+    df %>% count(hname, pos) %>% filter(pos == 1),
+    by = c("hname" = "hname")
+  ) %>%
+  na.omit() %>%
+  select(-pos) %>%
+  rename(Races = n.x, Wins = n.y) %>%
+  mutate(Fraction_Won = Wins / Races) %>%
+  arrange(desc(Fraction_Won))
+```
+
+Hmmm, not so satisfying, as it shows that the horses at the top of the list only ran one race and won it. I wouldn't call them the best because that one race could have been a fluke.
+
+Let's plot the number of races contested vs the number won to get a sense of the overall trends. This uses pretty much the same code as above, just with the plot added at the end. We jitter the points because both races and wins are integer valued. Try replacing geom_jitter with geom_point to see the difference. geom_smooth adds a smoothing curve to help visualize the trend, and we set se=FALSE to remove the confidence region, as we're not doing statistics yet.
+
+```{r}
+df %>%
+  count(hname) %>%
+  left_join(
+    df %>% count(hname, pos) %>% filter(pos == 1),
+    by = c("hname" = "hname")
+  ) %>%
+  na.omit() %>%
+  select(-pos) %>%
+  rename(Races = n.x, Wins = n.y) %>%
+  mutate(Fraction_Won = Wins / Races) %>%
+  ggplot(aes(x = Races, y = Wins)) +
+  geom_jitter() +
+  geom_smooth(se = FALSE)
+```
+
+From this plot we see that there was one horse that ran about 50 races and won about half of them - very impressive! Must be Junior!
+
+```{r}
+df %>%
+  count(hname) %>%
+  left_join(
+    df %>% count(hname, pos) %>% filter(pos == 1),
+    by = c("hname" = "hname")
+  ) %>%
+  na.omit() %>%
+  select(-pos) %>%
+  rename(Races = n.x, Wins = n.y) %>%
+  mutate(Fraction_Won = Wins / Races) %>%
+  filter(Wins > 20)
+```
+
+As you can see it is easy to follow interesting threads of questioning and get lost in the details before we've even validated the quality of the data set, so lets get back to that.
+
+What do finish times look like?
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time)) +
+  geom_histogram() +
+  labs(
+    x = "Finish Time",
+    y = "Count"
+  )
+```
+
+This looks _kind_of reasonable. Better to add a few more bars.
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    x = "Finish Time",
+    y = "Count"
+  )
+```
+
+Ok, seems to be something weird at about 70 seconds. Lets look at it a different way.
+
+```{r}
+df %>%
+  ggplot(aes(x = date, y = finish_time)) +
+  geom_point(alpha = 0.1) +
+  labs(
+    y = "Finish Time",
+    x = "Date"
+  )
+```
+
+Ok, clearly there was something weird going on in the spring or 2017. Further investigation revealed that one of the pieces of information that would be critical was not in the data set - the race length. These races in 2018 with sub-80 second finish times were for a shorter distance. We have two choices here: we can go back through the raw html and pull out the race distances and then have race distance as an independent variable we need to control for, or we can decide that since only a small number of races appear to be shorter, that we will exclude them from the data set. This is in fact what we do, and we simply have to remember (or write down) that any results and conclusions we arrive at will not necessarily hold at other race distances.
+
+```{r}
+df <- df %>% filter( finish_time > 100)
+```
+
+
+```{r}
+df %>%
+  ggplot(aes(x = date, y = finish_time)) +
+  geom_point(alpha = 0.1) +
+  labs(
+    y = "Finish Time",
+    x = "Date"
+  )
+```
+
+That looks much better, although there i a gap in late 2017, and in the summer of 2018. I'll be honest here - I had computer issues.
+
+So we found _some_ crap. Lets Lets plot the histogram again on this smaller data set.
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time)) +
+  geom_histogram() +
+  labs(
+    x = "Finish Time",
+    y = "Count"
+  )
+```
+
+The data seems to be bimodal, with peaks at about 116 seconds and at about 119 seconds. It is almost always the case that when your data is multimodal, there is more than one thing going on, and analyzing each thing seperately is better than analyzing them all together - at least as a first step. Let's make the binwidth smaller to see if this sheds any light.
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time)) +
+  geom_histogram(binwidth = 0.5) +
+  labs(
+    x = "Finish Time",
+    y = "Count"
+  )
+```
+
+That is weird - what is the comb-like structure? Lets make the binwidth even smaller
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time)) +
+  geom_histogram(binwidth = 0.1) +
+  labs(
+    x = "Finish Time",
+    y = "Count"
+  )
+```
+
+Even weirder. Lets see what the most common finish_times are:
+
+```{r}
+df %>% count(finish_time, sort = TRUE)
+```
+
+Notice anything about the digits to the right of the decimal? Rather than the most common ones, lets look at them all.
+
+```{r}
+df %>%
+  pull(finish_time) %>%
+  unique()
+```
+
+Now it slaps us in the face - the only values for the decimal place are 0,1,2,3, and 4. Given what we know about horse racing this makes no sense at all. And that now makes us look back at the time series plot above, where there is some gaps/quantization in the finish_times too.
+
+So what is this?
+
+So apparently years ago the races were timed with stop watches that had a resolution of one fifth of a second. And in some places, to fit in standard computer software, this was recorded like the numbers above. SO 100.2 does NOT equal one hundred and two tenths of a second, rather it equals (here) one hundred and two fifths of a second, i.e. 100.4 seconds.
+
+Lets fix that.
+
+```{r}
+df <- df %>% 
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+```
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time)) +
+  geom_histogram(binwidth = 0.1) +
+  labs(
+    x = "Finish Time (seconds)",
+    y = "Count"
+  )
+```
+
+Better! Not perfect, but good enough for now.
+
+Think we've found _all_ the crap?
+
+Lets have a look at the weather
+
+```{r}
+df %>%
+  ggplot(aes(x = date, y = temp)) +
+  geom_point() +
+  labs(
+    x = "Date",
+    y = "Temperature (C)"
+  )
+```
+
+Seems reasonable, at least for some parts of the globe.  I wonder if the weather changed on a race day?
+
+```{r}
+df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  arrange(desc(diff_temp))
+```
+
+Ok, so there was a race day where the temperature ranged from -22 to 9. Given that the races are typically held over a period of a few hours, I suspect that weather data for that day is faulty. What to do...what to do....
+If the purpose of this project was to make money, it would be worth looking up the weather records for those dates with large temperature swings to verify them, and then deciding what to do next. But for this project, we will ruthlessly eliminate any problems, and remember (or once again write down) that any results are only valid for days where he weather was relatively constant.
+
+```{r}
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>% filter(!(date %in% dts))
+```
+
+Let us also look at track conditions:
+
+```{r}
+df %>% count(cond)
+```
+
+We probably do not have enough data to do anything interesting on _Heavy_ days, so we'll eliminate those too.
+
+```{r}
+df <- df %>% filter(cond != "Heavy")
+```
+
+So now _maybe_ we have exorcised all the crap, or enough that we can start to do interesting things.
+
+A couple plots to confirm the sanity of our data.
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time, y = cond)) +
+  geom_density_ridges() +
+  labs(
+    x = "Finish Time (seconds)",
+    y = "Track Conditions"
+  )
+```
+
+
+
+```{r}
+df %>%
+  ggplot(aes(x = date, y = finish_time, colour = cond)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    x = "Date",
+    y = "Finish Time (seconds)",
+    colour = "Track Conditions"
+  )
+```
+
+Of course, expecting a straight line to fit what may be periodic data is not a good idea. We'll start to do some statistics next week (I hope!)
