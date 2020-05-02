@@ -1,0 +1,452 @@
+---
+title: "Ponies: Part V"
+subtitle: "Derby Special"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+# Introduction
+
+This post was originally intended to be about looking at all the variables in the data set and seeing what insights they might provide. Then I realized that it is derby weekend! If corona had not taken over the world, today would be the [Kentucky Derby](https://www.kentuckyderby.com/)  - but it has been rescheduled to September 5.
+
+So, in honour of what is sometimes called "The Most Exciting Two Minutes in Sports", we will jump right to predicting winners in our data set. The methods will be crude - flaws will be obvious and many. But, we will get some interesting results, and the approach we take here will give us a baseline to compare to, when we delve into fancier methods at a later date.
+
+We will get back to exploring the data next week, because moving too quickly into prediction before you understand the data can be hazardous.
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(DT) # for nice printing of tables, usingthe datatable function
+library(broom) # for using tidy on the output of lm
+```
+
+So we'll start where we left off by loading the data and applying all the filters and mutates we did last week.
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names() %>%
+  filter(finish_time > 100) %>%
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>%
+  filter(!(date %in% dts))
+```
+
+Now we are ready to go.
+
+Here is the plan. We will pick a date about halfway through the data set in order to have some history to work with. Then from that day forward, for each race, we will use data up to the day before that race as a training set, build a model for the race, predict who will win, and move on to the next race/day.
+
+For each algorithm we will show how it works on one race, and then put it into a function that can be called within two loops, an outer one for each day, and an inner one for each race on that day.
+
+```{r}
+theDate <- sort(unique(df$date))[length(unique(df$date)) / 2]
+```
+
+The date we start working with is `r theDate`
+
+# Setting the seed for reproducible research
+
+Ok before we do _anything_ else, we will run into the first time we explicitly need to worry about reproducibility. I say explicitly because already we have been doing reproducible work by putting everything into a .Rmd document that we can knit into our final results. No need to remember what we did, what transformations we applied to the data, etc. This is huge, because nothing loses credibility as a data scientist faster than somebody asking a question about how you got a result, and you don't remember and can't figure it out. With knitr, etc all the code is right there, so you can see exactly what was done, and each time you run it you will get exactly the same results (almost). There are many good references to reproducible research with R, I have found this [one](https://www.amazon.com/Reproducible-Research-RStudio-Chapman-Hall-dp-0367143984/dp/0367143984/ref=mt_paperback) useful.
+
+But more specifically any time you do something with randomness in R, like 
+
+```{r}
+runif(1)
+```
+
+you get different results. 
+
+```{r}
+runif(1)
+runif(1)
+runif(1)
+```
+
+See?
+
+But especially when developing your code, which usually means debugging your code, you want the result to always be the same. It would be horrible to come across a bug that only happens when some random number come up - you'd have a very hard time finding and fixing it.
+
+The solution is to set the random seed, and then each time we call any random numbers, the same sequence will come up.
+
+```{r}
+set.seed(2020)
+runif(1)
+set.seed(2020)
+runif(1)
+```
+
+Or
+
+```{r}
+set.seed(2020)
+runif(1)
+runif(1)
+runif(1)
+
+set.seed(2020)
+runif(1)
+runif(1)
+runif(1)
+```
+
+# Algorithms to predict the winner
+
+Ok, so now we'll stop fooling around with random seeds, we can try to predict who will win a race.
+
+```{r}
+set.seed(2020)
+```
+
+## Random choice algorithm
+
+Let us look at the hores in our race:
+
+```{r}
+race_roster <- df %>% filter(date == theDate, racenum == 3)
+race_roster %>%
+  datatable(
+    colnames = c(
+      "Race Number", "Position", "Horse Number", "Odds", "Temperature", "Conditions", "Finish Time", "Date", "Horse Name", "Jockey", "Trainer"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+We see there were only five horses in this race. It is easy to pick one randomly:
+
+```{r}
+our_pick <- sample(race_roster$hnum, 1)
+our_picks_position <- race_roster %>%
+  filter(hnum == our_pick) %>%
+  pull(pos)
+```
+
+So did our (random) pick win?
+
+```{r}
+our_picks_position == 1
+```
+
+Nope.
+
+That is all the logic to this algoprithm, we no just package it into a function.
+
+```{r}
+random_prediction <- function(this_date, this_race) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_pick <- sample(race_roster$hnum, 1)
+  return(our_pick)
+}
+```
+
+and we write a function that takes a date, racenumber and prediction and returns true if we picked the winner, and false otherwise
+
+```{r}
+did_we_win <- function(this_date, this_race, pred) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_picks_position <- race_roster %>%
+    filter(hnum == pred) %>%
+    pull(pos)
+  return(our_picks_position == 1)
+}
+```
+
+Lets try this random algorithm on the second half of the data set
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- random_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    ans <- c(ans, success)
+  }
+}
+
+ma <- mean(ans)
+```
+
+So, by guessing randomly, we are correct about `r scales::percent(ma)` of the time, i.e. 1 in `r round(1/ma)` times or so.
+
+## Pick the favourite algorithm
+
+Here we will try another strategy - always picking the favourite. There have been some studies that claim that the favourite is actually underpriced. This is likely because people generally do not want to risk (say) two dollars for the chance to win only fifty cents!
+
+Our code has to change only a little.
+
+```{r}
+favourite_prediction <- function(this_date, this_race) {
+  race_roster <- df %>%
+    filter(date == this_date, racenum == this_race) %>%
+    arrange(final_odds)
+  our_pick <- race_roster %>%
+    head(1) %>%
+    pull(hnum)
+  return(our_pick)
+}
+```
+
+We run the same simulation again
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- favourite_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    ans <- c(ans, success)
+  }
+}
+
+ma <- mean(ans)
+```
+
+Wow! Significantly better - we pick the winner `r scales::percent(ma)` of the time, or about once in every `r round(1/ma)` races. But the problem with picking the favourite all the time is that the winnings are small. In fact, a quick line of code
+
+```{r}
+avg_favourite_odds <-df %>% group_by(date, racenum) %>% summarize( favourite_odds = min(final_odds)) %>% pull(favourite_odds) %>% mean()
+```
+shows that the average odds of the favourite are `r round(avg_favourite_odds,2)`, and so on average we'd win `r round(avg_favourite_odds*ma,2)` for each dollar wagered. Not very impressive.
+
+## Normal algorithm
+
+We call this algorithm _normal_ because it uses the normal distribution _in a  completely inappropriate way_.
+
+As usual, we pull out the roster for the race
+
+```{r}
+race_roster <- df %>% filter(date == theDate, racenum == 3)
+```
+
+Next, we pull out the history for the horses in the race.
+
+```{r}
+trainingBase <- df %>% filter(hname %in% race_roster$hname, date < theDate)
+```
+
+And then we do a linear regression of the finish times on the horse name. We use the -1 to have no constant in the regression. Basically, we are calculating an average finish time for each horse.
+
+```{r}
+mylm <- lm(finish_time ~ hname - 1, data = trainingBase)
+```
+
+We pull out just the info we want from this regression using tidy from the awesome broom package
+
+```{r}
+db <- mylm %>%
+  tidy() %>%
+  mutate(term = str_sub(term, 6))
+```
+
+and so now we have an estimate of the average finish time for each horse in the race, based on their history.
+
+```{r}
+db %>%
+  select(term, estimate, std.error)%>%
+  datatable(
+    colnames = c(
+      "Horse Name", "Estimate", "Std Error"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+Here is where things get weird.
+
+We are going to _assume_ that a horse's finish time is normally distributed with mean _Estimate_, and standard deviation _Std Error_. So for each horse we can then simulate draws from their finish time distribution, and once we have those we can see what order the horses finished in.
+
+The code isn't too bad. Here are the finish times for one simulated race
+
+```{r}
+hsn <- nrow(db)
+z <- rnorm(hsn, db$estimate, db$std.error)
+z
+```
+
+and then to see the finishing order
+
+```{r}
+rank(z)
+```
+We see that horse number 5 finished first, horse number 3 finished second, etc.
+ 
+But one simulated race doesn't cut it, because there is randomness involved - so we can do t for many simulated races using _replicate_. Here we try four races
+
+```{r}
+sims <- 4
+z <- replicate(sims, rank(rnorm(hsn, db$estimate, db$std.error)))
+z
+```
+
+Then we can calculate the fraction of times each horse won in these simulated races
+
+```{r}
+p1 <- apply(z == 1, 1, sum) / sims
+p1
+```
+
+and we can bundle all this information back into a data frame to use
+
+```{r}
+p1c <- tibble(p1 = p1)
+db <- db %>% bind_cols(p1c)
+db <- db %>%
+  select(term, p1) %>%
+  rename(name = term)
+
+db %>%
+  datatable(
+    colnames = c(
+      "Horse Name", "Fraction of Simulated Races Won"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+Finally we just pull out the name of the horse that won the most races.
+```{r}
+db %>%
+  arrange(desc(p1)) %>%
+  head(1) %>%
+  pull(name)
+```
+
+Lets turn that into a function. 
+
+Here we have to be a bit careful - what happens if there is no history for any of the horses in our race, i.e. for all of them it is their first race? Then when we extract the trainingBase, it will be empty. The solution is easy once the problem is identified, simply return an NA for our pick.
+
+In fact, it is a little more complicated: imagine the only one horse has any history, then in the regression there will be only one level, and again we'll get an error. So we check for that too. Finally, if there is not enough data to estimate standard errors for one horse, then we really do not have enough information to bet this race, so we take care of that too. 
+
+Also note we use a default of 100 simulated races. Why 100? Long enough that the fractions settle down, short enough to run without getting bored.
+
+```{r}
+normal_prediction <- function(this_date, this_race, sims = 100) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  trainingBase <- df %>% filter(hname %in% race_roster$hname, date < theDate)
+  if (nrow(trainingBase) == 0) {
+    return(NA)
+  }
+  if (length(unique(trainingBase$hname)) == 1) {
+    return(NA)
+  }
+  mylm <- lm(finish_time ~ hname - 1, data = trainingBase)
+  db <- mylm %>%
+    tidy() %>%
+    mutate(term = str_sub(term, 6))
+  l <- db %>%
+    filter(is.nan(std.error)) %>%
+    nrow()
+  if (l > 0) {
+    return(NA)
+  }
+  hsn <- nrow(db)
+  z <- replicate(sims, rank(rnorm(hsn, db$estimate, db$std.error)))
+  p1 <- apply(z == 1, 1, sum) / sims
+  p1c <- tibble(p1 = p1)
+  db <- db %>% bind_cols(p1c)
+  db <- db %>%
+    select(term, p1) %>%
+    rename(name = term)
+  pred_name <- db %>%
+    arrange(desc(p1)) %>%
+    head(1) %>%
+    pull(name)
+  our_pick <- race_roster %>%
+    filter(hname == pred_name) %>%
+    pull(hnum)
+  return(our_pick)
+}
+```
+
+But then we have to modify our did_we_win function to do the right thing if the prediction is NA.
+
+```{r}
+did_we_win <- function(this_date, this_race, pred) {
+  if (is.na(pred)) {
+    return(NA)
+  }
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_picks_position <- race_roster %>%
+    filter(hnum == pred) %>%
+    pull(pos)
+  return(our_picks_position == 1)
+}
+```
+
+Finally we can run the simulations for the second half of the data to see how we do.
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- normal_prediction(theDate, theRace, 100)
+    success <- did_we_win(theDate, theRace, pred)
+    ans <- c(ans, success)
+  }
+}
+ma <- mean(ans, na.rm = TRUE)
+```
+
+Here we pick the winner `r scales::percent(ma)` of the time, or about once in every `r round(1/ma)` races. The reason for pursuing this scheme is that so far it is dead simple (statistically), but has lots of room for improvement. And unlike the pick the favourite scheme, perhaps this one will allow us to make some money.
+
+Note when doing this kind of work, it is quite common to start with a  function that works when all your data is good, and then as you subject it to more and more data to find problems. Then you go and detect them, fix them, and iterate. After a few iterations, you may end up refactoring your code to make it cleaner.
+
+### Why is the normal distribution inappropriate?
+
+First of all, a normal distribution has a non-zero probability of being less than zero - in other words, regardless of the parameters we _could_ predict some horse's finish time to be less than zero. Predicting that a horse finished the race before it even started is a bad idea.
+
+Second, the shape of the distribution is quite likely not normal. We will look at this a little more in the future, it is probably something more like a shifted gamma distribution.
+
+Using the standard error as the standard deviation is also just wrong. The standard error is the standard deviation of our estimate of the mean - a very different thing.
+
+And we could find more flaws. But the point was to build a model we could start with, and compare to. For example, maybe we could factor in effects due to temperature, track conditions, etc.
+
+
+# Conclusion
+
+So if you want to bet, you could throw your money away by picking some random horse, you could bet on the favourite and then if you win, you win only a small amount of money, or you could try something fancier than our normal algorithm above.
+
+Over the next weeks we will go back to interrogating the data set, and then discuss some betting strategies. One interesting thing we will try to figure out is how good do we need to be at picking the winner to make money?
+
+And to go along with the derbey week theme, I just finished reading [The Race for the Triple Crown](https://www.amazon.com/Race-Triple-Crown-Horses-Eternal/dp/0802138853/). It was pretty good.
