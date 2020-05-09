@@ -1,0 +1,463 @@
+---
+title: "Ponies: Part 6"
+subtitle: "What difference does it make?"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+# Introduction
+
+This week we return to data exploration in order to better understand what variables seem to affect performance. These discoveries should inform our model building in the coming weeks.
+
+But first, a few words about last week.  
+- First there was a virtual Triple Crown event. You can watch it [here](https://www.youtube.com/watch?v=LSLhcYohp_M&feature=youtu.be) and read about it [here](https://www.kentucky.com/sports/horses/kentucky-derby/article242399436.html).  
+- If that was too fast for you, then maybe the [Turtle Derby](https://www.youtube.com/watch?v=q1cFQpl_qkw) is more to your liking.  
+
+There are a couple reasons we did simulations last week:  
+- We wanted to get a probability of winning, rather than just an estimate of the horse's finish time. This will become important in later posts.  
+- I said earlier that using just one number to describe anything that is not trivial is a lie - here we want to know (ideally) the probability of where a horse will finish (i.e. the _distribution_ of finishing positions), as well as to know how much data these estimates were based on (how many simulated races, how much history for each horse, etc). All this is available from the simulations and can be used to inform our betting strategy. Surely you would trust an estimate based on 1000 simulations and history of length 50 more than 3 simulations based on a history of length two!  
+- In the simple approach we took (normal distribution), it is possible to explicitly calculate the joint distribution of where each horse finishes, and then come up with the probabilities of winning, etc. But it would be error prone and complicated. Furthermore it would likely not extend to different distributions, additional factors, etc.
+
+# Overall results
+
+In this section we will look at the data for all the horses, and then in the next section we will focus on just one, hopefully typical, horse.
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(ggridges)
+library(DT)
+```
+
+We'll load the data and apply all the filtering and mutating we did a few weeks ago.
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names() %>%
+  filter(finish_time > 100) %>%
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>%
+  filter(!(date %in% dts)) %>%
+  filter(cond != "Heavy")
+```
+
+Now we're ready to go.
+
+## Odds
+
+```{r} 
+df %>%
+  ggplot(aes(x = final_odds)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    x = "Odds",
+    y = "Count"
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+Looks like there are minor peaks at 50, 60, 70 & 80 to one. That seems a little strange as it should be determined by the bets.
+
+```{r}
+df %>%
+  ggplot(aes(x = final_odds, y = finish_time)) +
+  geom_point(alpha = 0.05) +
+  geom_smooth(se = FALSE) +
+  labs(
+    x = "Odds",
+    y = "Finish Time (s)"
+  ) +
+  theme_minimal()
+```
+
+Again we see the peaks, and it is somewhat reassuring that the better the odds, the faster the horse (as an overall statement)
+
+```{r}
+df %>%
+  ggplot(aes(x = final_odds, y = pos)) +
+  geom_jitter(alpha = 0.05) +
+  labs(
+    x = "Odds",
+    y = "Finishing Position"
+  ) +
+  scale_y_continuous(breaks = seq(1, 9, by = 1)) +
+  theme_minimal()
+```
+
+Here we see that the better the finishing position, the more concentrated the odds are
+
+```{r}
+df %>%
+  ggplot(aes(x = final_odds, y = factor(pos))) +
+  geom_density_ridges(stat = "binline", binwidth = 1) +
+  labs(
+    x = "Odds",
+    y = "Finishing Position"
+  ) +
+  theme_minimal()
+```
+
+This is just an alternative way to view the previous plot.
+
+## Weather
+
+How does weather (temperature and track condition) affect the results?
+
+```{r}
+df %>%
+  ggplot(aes(x = date, y = temp, colour = cond)) +
+  geom_point() +
+  labs(
+    x = "Date",
+    y = "Temperature (C)",
+    colour = "Track Conditions"
+  ) +
+  theme_minimal()
+```
+
+We see that he vast majority of data points are under Fast and Good conditions, and the temperature has seasonal fluctuations, with a few very cold days.
+
+```{r}
+df %>%
+  ggplot(aes(x = temp, y = finish_time)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(se = FALSE) +
+  labs(
+    y = "Finish Time (s)",
+    x = "Temperature (C)"
+  ) +
+  theme_minimal()
+```
+
+Here each point is one horse in one race - we see that in general a higher temperature leads to a faster race.
+
+```{r}
+df %>%
+  filter(cond %in% c("Fast", "Good")) %>%
+  ggplot(aes(x = temp, y = finish_time, colour = cond)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "lm") +
+  labs(
+    y = "Finish Time (s)",
+    x = "Temperature (C)",
+    colour = "Track Condition"
+  ) +
+  theme_minimal()
+```
+
+The same holds for each track condition - we have eliminated the Sloppy and Snowy races to reduce clutter.
+
+```{r}
+df %>%
+  ggplot(aes(x = finish_time, y = cond)) +
+  geom_density_ridges() +
+  labs(
+    x = "Finish Time (s)",
+    y = "Track Condition"
+  ) +
+  theme_minimal()
+```
+
+The multiple peaks in Snowy and Sloppy conditions are likely artifacts of the small sample size for those conditions. The one for Good is unresolved.
+
+```{r}
+df %>%
+  count(cond) %>%
+  datatable(
+    colnames = c(
+      "Track Condition", "Horse Records"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+Above we see how many horses raced under each condition, and below we show how many races were conducted under each condition.
+
+```{r}
+df %>%
+  distinct(date, cond) %>%
+  count(cond) %>%
+  datatable(
+    colnames = c(
+      "Track Condition", "Races"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+## Starting position
+
+```{r}
+df %>%
+  ggplot(aes(y = factor(hnum), x = pos)) +
+  geom_density_ridges(stat = "binline", binwidth = 1) +
+  labs(
+    x = "Starting Position",
+    y = "Finishing Position"
+  ) +
+  scale_x_continuous(breaks = seq(1, 10, by = 1)) +
+  theme_minimal()
+```
+
+A lower numbered starting position is closer to the inside of the track, and therefore such a horse has a very slightly shorter distance to run. It seems that there _might_ be an effect due to this, but if you ignore races with seven or more finishers (which seems valid because there are fewer races with more horses, and so the sample size is smaller), the results are similar.
+
+## Date
+
+```{r}
+df %>%
+  ggplot(aes(y = finish_time, x = date)) +
+  geom_smooth(se = FALSE) +
+  geom_point(alpha = 0.05) +
+  labs(
+    x = "Date",
+    y = "Finish Time (s)"
+  ) +
+  theme_minimal()
+```
+
+So there were some periods where there were were no races, or my computer wasn't behaving. Other than that we see the cyclicality, similar to temperature above, but also what might be a slight downward trend, suggesting that the races are getting faster. There could be many reasons for this: wonky data, better training methods, better conditioning of the track, etc.
+
+## Race number
+
+```{r}
+df %>%
+  ggplot(aes(y = finish_time, x = racenum)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(se = FALSE) +
+  labs(
+    x = "Race Number",
+    y = "Finish Time (s)"
+  ) +
+  theme_minimal()
+```
+
+Here we see that the later races are typically faster than the earlier races. This is to be expected,as the later races typically have larger purses, etc.
+
+## Horse
+
+```{r}
+dm <- df %>%
+  group_by(hname) %>%
+  summarize(mn = mean(finish_time)) %>%
+  ungroup()
+df %>%
+  left_join(dm) %>%
+  ggplot(
+    aes(y = finish_time, x = reorder(hname, -mn))
+  ) +
+  geom_point(alpha = 0.05) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  labs(
+    y = "Finish Time(s)",
+    x = "Horse"
+  ) +
+  coord_flip()
+```
+
+This plot, as well as the next few, simply show the range of finish times for the horses, jockeys and trainers.
+
+## Jockey
+
+```{r}
+dm <- df %>%
+  group_by(jockey) %>%
+  summarize(mn = mean(finish_time)) %>%
+  ungroup()
+df %>%
+  left_join(dm) %>%
+  ggplot(
+    aes(y = finish_time, x = reorder(jockey, -mn))
+  ) +
+  geom_point(alpha = 0.05) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  labs(
+    y = "Finish Time(s)",
+    x = "Jockey"
+  ) +
+  coord_flip()
+```
+
+## Trainer
+
+```{r}
+dm <- df %>%
+  group_by(trainer) %>%
+  summarize(mn = mean(finish_time)) %>%
+  ungroup()
+df %>%
+  left_join(dm) %>%
+  ggplot(
+    aes(y = finish_time, x = reorder(trainer, -mn))
+  ) +
+  geom_point(alpha = 0.05) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  labs(
+    y = "Finish Time(s)",
+    x = "Trainer"
+  ) +
+  coord_flip()
+```
+
+# One horse
+
+Now that we have seen overall trends, let's look at one horse. We choose Derrick because he has a large number of races in his history.
+
+```{r}
+dfd <- df %>% filter(hname == "Derrick")
+```
+
+```{r}
+dfd %>%
+  count(cond) %>%
+  datatable(
+    colnames = c(
+      "Track Condition", "Races"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+As there are very few sloppy or snowy races, lets eliminate them.
+
+```{r}
+dfd <- dfd %>% filter(cond %in% c("Fast", "Good"))
+```
+
+```{r}
+dfd %>%
+  ggplot(aes(x = date, y = finish_time)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  facet_wrap(~cond) +
+  labs(
+    x = "Date",
+    y = "Finish Time (s)"
+  ) +
+  theme_minimal()
+```
+
+Here we see that in Fast conditions Derrick may be getting faster. In Good conditions, it looks like probably the outlier at almost 123 seconds is pulling the curve up and without that point, he is either staying the same or getting faster too.
+
+```{r}
+dfd %>%
+  ggplot(aes(x = date, y = finish_time, colour = cond)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    x = "Date",
+    y = "Finish Time (s)",
+    colour = "Track Condition"
+  ) +
+  theme_minimal()
+```
+
+Here we see the same story, just with a  linear fit. 
+
+```{r}
+dfd %>%
+  ggplot(aes(x = finish_time, y = cond)) +
+  geom_density_ridges(stat = "binline", binwidth = 0.5) +
+  labs(
+    x = "Track Condition",
+    x = "Finish Time (s)",
+    colour = "Track Condition"
+  ) +
+  theme_minimal()
+```
+
+Here we see that Fast is actually faster than Good.
+
+```{r}
+dfd %>%
+  ggplot(aes(y = racenum, x = date)) +
+  geom_point() +
+  geom_smooth() +
+  labs(
+    x = "Date",
+    x = "Race Number"
+  ) +
+  theme_minimal()
+```
+
+Derrick's performance seems pretty constant regardless of what race he is in.
+
+## Does having a few days off affect performance?
+
+It might be thought that a few days rest will improve a horse's performance, or that too large a gap will slow him down. There are a few large gaps, on the order of several months to almost a year. We filter those out.
+
+```{r}
+dfdf <- dfd %>%
+  filter(cond == "Fast") %>%
+  arrange(date)
+dfdg <- dfd %>%
+  filter(cond == "Good") %>%
+  arrange(date)
+
+dfdf <- dfdf %>%
+  mutate(
+    last_time = lag(finish_time),
+    last_date = lag(date),
+    delta_t = finish_time - last_time,
+    delta_d = as.numeric(date - last_date)
+  ) %>%
+  select(-hname, -jockey, -trainer, -cond)
+
+dfdg <- dfdg %>%
+  mutate(
+    last_time = lag(finish_time),
+    last_date = lag(date),
+    delta_t = finish_time - last_time,
+    delta_d = as.numeric(date - last_date)
+  ) %>%
+  select(-hname, -jockey, -trainer, -cond)
+
+
+bind_rows(dfdf %>% mutate(cond = "Fast"), dfdg %>% mutate(cond = "Good")) %>%
+  ggplot(aes(x = delta_d, y = delta_t, colour = cond)) +
+  geom_point() +
+  geom_smooth(se = FALSE, method = "lm") +
+  labs(
+    x = "Gap between races (days)",
+    y = "Change in finish time (s)",
+    colour = "Track Condition"
+  ) +
+  coord_cartesian(xlim = c(0, 60)) +
+  theme_minimal()
+```
+
+There appears to be minimal effect due to having days off.
+
+# Conclusion
+
+Now we have done a pretty good first pass through the data and know what to expect. As things come up, we may revisit end up doing more EDA, cleaning etc. But for now, we're on to more interesting things.
+
+Next week - a few simple betting strategies.
+
