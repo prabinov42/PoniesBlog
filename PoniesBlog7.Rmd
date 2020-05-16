@@ -1,0 +1,294 @@
+---
+title: "Ponies: Part 7"
+subtitle: "Money for Nothing"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+# Introduction
+
+Today would have been the Preakness stakes, the second jewel in the triple crown.
+
+So far we have focused on predicting who wins - but that is the wrong metric. This comes up all the time in data science: we find a metric that we think is highly indicative of success, and then work to optimize that metric. If you work somewhere where they have MBO (management by objectives), you surely have seen situations where the objective is optimized, but it is the wrong objective. Here, what we really care about is not who wins, but how much money we win. Now if we could predict who wins all the time, we could then optimize our winnings pretty easily, but that is not the case. So we will now switch our focus to trying to maximize our winnings, one component of which is predicting as well as we can.
+
+# Load the data
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(ggridges)
+library(broom)
+library(DT)
+```
+
+We'll load the data and apply all the filtering and mutating we did last week.
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names() %>%
+  filter(finish_time > 100) %>%
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>%
+  filter(!(date %in% dts)) %>%
+  filter(cond != "Heavy")
+```
+
+We still have our functions from a few weeks ago to predict the winner and figure out if we won.
+
+```{r}
+random_prediction <- function(this_date, this_race) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_pick <- sample(race_roster$hnum, 1)
+  return(our_pick)
+}
+
+favourite_prediction <- function(this_date, this_race) {
+  race_roster <- df %>%
+    filter(date == this_date, racenum == this_race) %>%
+    arrange(final_odds)
+  our_pick <- race_roster %>%
+    head(1) %>%
+    pull(hnum)
+  return(our_pick)
+}
+
+normal_prediction <- function(this_date, this_race, sims = 100) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  trainingBase <- df %>% filter(hname %in% race_roster$hname, date < theDate)
+  if (nrow(trainingBase) == 0) {
+    return(NA)
+  }
+  if (length(unique(trainingBase$hname)) == 1) {
+    return(NA)
+  }
+  mylm <- lm(finish_time ~ hname - 1, data = trainingBase)
+  db <- mylm %>%
+    tidy() %>%
+    mutate(term = str_sub(term, 6))
+  l <- db %>%
+    filter(is.nan(std.error)) %>%
+    nrow()
+  if (l > 0) {
+    return(NA)
+  }
+  hsn <- nrow(db)
+  z <- replicate(sims, rank(rnorm(hsn, db$estimate, db$std.error)))
+  p1 <- apply(z == 1, 1, sum) / sims
+  p1c <- tibble(p1 = p1)
+  db <- db %>% bind_cols(p1c)
+  db <- db %>%
+    select(term, p1) %>%
+    rename(name = term)
+  pred_name <- db %>%
+    arrange(desc(p1)) %>%
+    head(1) %>%
+    pull(name)
+  our_pick <- race_roster %>%
+    filter(hname == pred_name) %>%
+    pull(hnum)
+  return(our_pick)
+}
+
+did_we_win <- function(this_date, this_race, pred) {
+  if (is.na(pred)) {
+    return(NA)
+  }
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_picks_position <- race_roster %>%
+    filter(hnum == pred) %>%
+    pull(pos)
+  return(our_picks_position == 1)
+}
+```
+
+# Betting schemes
+
+```{r}
+set.seed(2020)
+theDate <- sort(unique(df$date))[length(unique(df$date)) / 2]
+```
+
+## Bet at random
+
+We'll proceed as before - develop what we need in a simple case, and then turn it into a function to make using it easier.
+
+At this point you may have noticed that the functions we create are very simple - it is almost always better to start out simple and add what you need when you need it than to try to anticipate every possibility. In addition, it is well known that premature optimization is the root of all evil - so our functions are _not_ optimized in any way and can surely be made faster with some effort - if the need ever arises.
+
+Here is our race roster again
+
+```{r}
+race_roster <- df %>% filter(date == theDate, racenum == 3)
+race_roster %>%
+  datatable(
+    colnames = c(
+      "Race Number", "Position", "Horse Number", "Odds", "Temperature", "Conditions", "Finish Time", "Date", "Horse Name", "Jockey", "Trainer"
+    ), rownames = FALSE,
+    options = list(pageLength = 16, dom = "t")
+  )
+```
+
+And here is a simple function to pull out the odds of whatever horse we bet on.
+
+```{r}
+get_odds <- function(theDate, theRace, thePick) {
+  odds <- df %>%
+    filter(date == theDate, racenum == theRace, hnum == thePick) %>%
+    pull(final_odds)
+  return(odds)
+}
+```
+
+Let's make sure it works
+
+```{r}
+theRace <- 3
+theBet <- 2
+our_pick <- random_prediction(theDate, theRace)
+our_odds <- get_odds(theDate, theRace, our_pick)
+we_won <- did_we_win(theDate, theRace, our_pick)
+incr <- if_else(we_won, 2 * (1 + our_odds), -2)
+incr
+```
+
+The logic is simply if we win we get back our original bet, plus our bet times the odds. On the other hand, if we lose, we lose whatever we bet.
+
+As usual we put this all together in a loop
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- random_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    our_odds <- get_odds(theDate, theRace, pred)
+    incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+    ans <- c(ans, incr)
+  }
+}
+
+tibble(ans = ans) %>%
+  mutate(n = 1:nrow(.), fortune = cumsum(ans)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = "Bet a Random Horse"
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+We see that betting a horse chosen at random is _not_ a good idea.
+
+## Bet the favourite
+
+Minimal code changes allow us to check out the strategy of always betting the same amount (two dollars) on the favourite.
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- favourite_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    our_odds <- get_odds(theDate, theRace, pred)
+    incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+    ans <- c(ans, incr)
+  }
+}
+
+tibble(ans = ans) %>%
+  mutate(n = 1:nrow(.), fortune = cumsum(ans)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = "Bet the Favourite Horse"
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+Wow - that is good. If the track were open - I'd be there!
+
+## Bet the normal
+
+Finally we can try our more sophisticated strategy from a few weeks ago. Recall that in some cases this scheme does not make a prediction, so we adapt the code for that, and obviously the resulting plot may have fewer races.
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- normal_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    if (!is.na(pred)) {
+      our_odds <- get_odds(theDate, theRace, pred)
+      incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+      ans <- c(ans, incr)
+    }
+  }
+}
+
+tibble(ans = ans) %>%
+  mutate(n = 1:nrow(.), fortune = cumsum(ans)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = 'Bet the "Normal" Horse'
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+Wow - not so good!
+
+# Conclusion
+
+Ok, so this is data science at it's finest! Sometimes, if you are really lucky, in the middle of the night you know something that nobody else in the world knows. That is what I love about data science. What usually happens next is you go to sleep, wake up, take a shower, brew a pot of coffee and try to figure out where you went wrong - especially if your results look too good to be true. That is what we'll do next week - either figure out why the betting the favourite code is wrong/inapplicable, or maybe, just maybe, there won't be a post because I will be on my brand new yacht in the Caribbean.
+
+
