@@ -1,0 +1,392 @@
+---
+title: "Ponies: Part 9"
+subtitle: "Yacht or Typo?"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+# Introduction
+
+A few weeks ago we had a simple strategy (just bet on the favourite) that looked like it was a winner. I was suspicious, and said that either there was a problem with the code (typo), or I'd not be writing for a while because I'd be on my yacht in the Caribbean. Well, the fact that I am writing this blog a few weeks later should lead you to conclude that I do not have a new yacht!
+
+Doubting your results when they are too good to be true is an essential part of data science, as is Twyman's law which states that "Any figure that looks interesting or different is usually wrong". So here we poke & prod to find out where we went wrong.
+
+Also note that the code is a little rough this week. Consider it an exercise for the reader to clean it up.
+
+# Load the data
+
+As always we start by loading the libraries and data, and applying all the filtering and mutating we did in previous weeks.
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(ggridges)
+library(broom)
+library(DT)
+```
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names() %>%
+  filter(finish_time > 100) %>%
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>%
+  filter(!(date %in% dts)) %>%
+  filter(cond != "Heavy")
+```
+
+We still have our functions from a few weeks ago to predict the winner and figure out if we won.
+
+```{r}
+favourite_prediction <- function(this_date, this_race) {
+  race_roster <- df %>%
+    filter(date == this_date, racenum == this_race) %>%
+    arrange(final_odds)
+  our_pick <- race_roster %>%
+    head(1) %>%
+    pull(hnum)
+  return(our_pick)
+}
+
+did_we_win <- function(this_date, this_race, pred) {
+  if (is.na(pred)) {
+    return(NA)
+  }
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_picks_position <- race_roster %>%
+    filter(hnum == pred) %>%
+    pull(pos)
+  return(our_picks_position == 1)
+}
+
+get_odds <- function(theDate, theRace, thePick) {
+  odds <- df %>%
+    filter(date == theDate, racenum == theRace, hnum == thePick) %>%
+    pull(final_odds)
+  return(odds)
+}
+
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- favourite_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    our_odds <- get_odds(theDate, theRace, pred)
+    incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+    ans <- c(ans, incr)
+  }
+}
+```
+
+Here is the plot from last time showing our fortune growing.
+
+```{r}
+tibble(ans = ans) %>%
+  mutate(n = 1:nrow(.), fortune = cumsum(ans)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = "Bet the Favourite Horse"
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+# Possible explanations
+
+One possible explanation is that we were _very_ lucky. Recall we only started predicting half-way through the data so that we'd have some history to use to make predictions. But betting on the favourite doesn't require any history - so if we ran this scheme against the whole data set, maybe we wouldn't do so well?
+
+Lets see. A simple change to one line of code does it.
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- c()
+for (theDate in dates) { # this line changed
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- favourite_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    our_odds <- get_odds(theDate, theRace, pred)
+    incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+    ans <- c(ans, incr)
+  }
+}
+
+tibble(ans = ans) %>%
+  mutate(n = 1:nrow(.), fortune = cumsum(ans)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = "Bet the Favourite Horse",
+    subtitle = "Whole data set"
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+Wow, we'd make even more money. So we weren't just lucky in choosing the 'best' time window.
+
+The next step was a painful walk through all the code, making sure each piece of it did what I thought it did. And it did. So that isn't the problem.
+
+Let us have a look and see how much we won each race - maybe that will provide some clues.
+
+We build a data frame with more info (prolly the proper way to do it from the start)
+
+```{r}
+ansdf <- tibble()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- favourite_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    our_odds <- get_odds(theDate, theRace, pred)
+    incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+    ans <- tibble(pred = pred, success = success, our_odds = our_odds, incr = incr, theDate = theDate, theRace = theRace)
+    ansdf <- bind_rows(ansdf, ans)
+  }
+}
+
+ansdf %>%
+  ggplot(aes(x = as.Date(theDate, origin = "1970-01-01"), y = incr)) +
+  geom_point() +
+  labs(
+    x = "Date",
+    y = "Increment"
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+A few points about this plot:  
+*  There are many races on each day, as expected.  
+*  We see a bunch of races where the increment (amount won or lost) is losing two dollars. Those are the races where the horse with the lowest odds (the favourite), i.e. the one we picked, did not win.  
+* There are some races where our pick, which is the horse with the best odds, incremented our fortune by almost ten dollars. That seems strange. Recall that if we win, we get back our original bet (two dollars) and then the odds multiplied by the two dollars. So, that means the odds on the horse that incremented us almost ten dollars must have been (10-2)/2=4, about 4 to 1. And that was the favourite??? That seems unlikely.
+
+So let us see what actually happened in the races where the favourite had relatively high odds.
+
+```{r}
+favourites <- df %>%
+  group_by(date, racenum) %>%
+  summarize(
+    min_odds = min(final_odds),
+  )
+
+df %>%
+  left_join(favourites, by = c("date" = "date", "racenum" = "racenum")) %>%
+  filter(final_odds == min_odds, pos == 1, final_odds > 3)
+```
+
+These are three races where the favourite won, and yet the odds of the favourite were greater than 3 to 1.
+
+Now came the most unfun, but important part. I checked the original data to make sure the parsing and munging of data for these races was correct - any error here would lead to all sorts of chaos, so I was relieved to see that this code worked properly too. It was not a data problem.
+
+Lets have a look at the first of these races:
+
+```{r}
+df %>% filter(date == make_date(2017, 6, 5), racenum == 5)
+```
+
+Hmmmm, not much of a clue here, although it looks like four horses were all pretty evenly matched.
+
+Let us look at the next one:
+
+```{r}
+df %>% filter(date == make_date(2018, 2, 12), racenum == 7)
+```
+
+Well that _is_ interesting. There were horses numbered (at least) 1 through 9, but only 5 of them finished the race!
+
+Let us look at the last one:
+
+```{r}
+df %>% filter(date == make_date(2018, 3, 2), racenum == 8)
+```
+
+Horses numbered through 7, but only 6 finishers.
+
+Ok, that is enough to suggest a possible explanation (maybe not the only one though).
+It looks like the only horses being recorded are those that finish the race. Thus in some cases there were horses that ran but were disqualified or did not finish (injury, etc). And so when we choose the favourite from this list, it is the favourite from the horses that finished, not the ones that started the race, and so our results are biased.
+
+# Complete races
+
+The question is how much?
+
+Let us look at just the races where the number of horses that finished the race is the same as the highest number of any horse in the race.
+
+```{r}
+ansdf <- tibble()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- favourite_prediction(theDate, theRace)
+    success <- did_we_win(theDate, theRace, pred)
+    our_odds <- get_odds(theDate, theRace, pred)
+    incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+    race_roster <- df %>% filter(date == theDate, racenum == theRace)
+    ans <- tibble(pred = pred, success = success, our_odds = our_odds, incr = incr, theDate = theDate, theRace = theRace, maxhnum = max(race_roster$hnum), nh = nrow(race_roster))
+    ansdf <- bind_rows(ansdf, ans)
+  }
+}
+
+ansdf %>%
+  filter(maxhnum == nh) %>%
+  mutate(fort = cumsum(incr)) %>%
+  ggplot(aes(x = 1:nrow(.), y = fort)) +
+  geom_point() +
+  labs(
+    x = "Race",
+    y = "Fortune"
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+
+final_dollars <- ansdf %>%
+  filter(maxhnum == nh) %>%
+  mutate(fort = cumsum(incr)) %>%
+  tail(1) %>%
+  pull(fort)
+```
+
+So we'd have a fortune of `about three hundred dollars`r final_dollars` dollars, rather than five hundred or so.
+
+# Incomplete races
+
+But wait - we only know that a horse didn't finish once the race is run - so there are all the races where we bet on the favourite, but the favourite didn't finish that we have to account for, and on each of these we'd have lost two dollars.
+
+So how many such races were there? We'll have to estimate. Note all these numbers will be best guesses - there may have been races where the horse was scratched, etc. But what we're after is to see if the bet the favourite strategy is a sure-fire money maker, a sure loser, or somewhere in between.
+
+First how many races didn't have all the horses that started finish?
+
+```{r}
+ni <- ansdf %>%
+  filter(maxhnum != nh) %>%
+  nrow()
+ni
+```
+
+and how many were there where all horses finished? 
+
+```{r}
+nc<-ansdf %>%
+  filter(maxhnum == nh) %>%
+  nrow()
+nc
+```
+
+In what fraction of the incomplete races do the favorites win? It is reasonable to assume same rates as for the complete cases, which is
+
+```{r}
+ansdf %>%
+  filter(maxhnum == nh) %>%
+  count(success)
+```
+
+which means we win this fraction of the races (btw, check out tabyl in the janitor package, it is terrific)
+
+```{r}
+wp <- ansdf %>%
+  filter(maxhnum == nh) %>%
+  tabyl(success) %>%
+  filter(success) %>%
+  pull(percent)
+wp
+```
+
+which means we lose a fraction `r 1-wp` of the time.
+
+For each loss, of which there are about
+
+```{r}
+round((1 - wp) * ni)
+```
+
+
+we lose two dollars, so we lose `r 2*round((1-wp)*ni)` dollars.
+
+For the other `r round(ni*wp)` we'd win, but at what odds?
+
+Lets assume the same as the odds of the favorite in complete races, (which is _not_ the odds of the favorite in complete races that the favorite won!). For those, the odds are:
+
+```{r}
+wo <- df %>%
+  group_by(date, racenum) %>%
+  summarize(
+    nh = n(),
+    maxhnum = max(hnum),
+    modds = min(final_odds)
+  ) %>%
+  filter(nh == maxhnum) %>%
+  pull(modds) %>%
+  mean()
+
+wo
+```
+
+So in those races we'd win about `r round(ni*wp*2*(1+wo))` dollars.
+
+In total then, at the end of our time frame, we can figure out how much money we'd have.
+
+```{r}
+
+ww <- ni * wp * 2 * (1 + wo)
+ll <- 2 * (1 - wp) * ni
+
+prof <- round(final_dollars + ww - ll)
+rcs <- ansdf %>% nrow()
+
+pret <- round(prof / rcs, 2) / 2
+```
+
+Finally we'd have about `r prof` dollars.
+
+Over `r rcs` races, for an average profit of `r round(prof/rcs,2)` dollars per race, on an investment of two dollars per race, for a `r  scales::percent_format(big.mark = "")(pret)` return.
+
+
+# Conclusion
+
+We made a lot of approximations and assumptions, but came up with a return of `r  scales::percent_format(big.mark = "")(pret)`. This suggests that  betting the favourite is not a sure-fire money maker, nor a sure loser, but rather somewhere in between, and requires more work to assess.
+
