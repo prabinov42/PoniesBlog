@@ -1,0 +1,334 @@
+---
+title: "Ponies: Part 10"
+subtitle: "Applying Kelly's Formula"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+# Introduction
+
+A few weeks ago we looked at Kelly's formula. And a few weeks before that, we developed a winner prediction scheme that had about 25% accuracy. Now we'll show how to use Kelly's formula with these predictions, and you will see why we needed a probability of winning, rather than just a best guess at who the winner was.
+
+# Load the data
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(ggridges)
+library(broom)
+library(DT)
+```
+
+We'll load the data and apply all the filtering and mutating we did last week.
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names() %>%
+  filter(finish_time > 100) %>%
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>%
+  filter(!(date %in% dts)) %>%
+  filter(cond != "Heavy")
+```
+
+We still have our functions from a few weeks ago to predict the winner and figure out if we won.
+
+```{r}
+normal_prediction <- function(this_date, this_race, sims=100) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  trainingBase <- df %>% filter(hname %in% race_roster$hname, date < theDate)
+  if (nrow(trainingBase) == 0) {
+    return(NA)
+  }
+  if (length(unique(trainingBase$hname)) == 1) {
+    return(NA)
+  }
+  mylm <- lm(finish_time ~ hname - 1, data = trainingBase)
+  db <- mylm %>%
+    tidy() %>%
+    mutate(term = str_sub(term, 6))
+  l <- db %>%
+    filter(is.nan(std.error)) %>%
+    nrow()
+  if (l > 0) {
+    return(NA)
+  }
+  hsn <- nrow(db)
+  z <- replicate(sims, rank(rnorm(hsn, db$estimate, db$std.error)))
+  p1 <- apply(z == 1, 1, sum) / sims
+  p1c <- tibble(p1 = p1)
+  db <- db %>% bind_cols(p1c)
+  db <- db %>%
+    select(term, p1) %>%
+    rename(name = term)
+  pred_name <- db %>%
+    arrange(desc(p1)) %>%
+    head(1) %>%
+    pull(name)
+  our_pick <- race_roster %>%
+    filter(hname == pred_name) %>%
+    pull(hnum)
+  return(our_pick)
+}
+
+did_we_win <- function(this_date, this_race, pred) {
+  if (is.na(pred)) {
+    return(NA)
+  }
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_picks_position <- race_roster %>%
+    filter(hnum == pred) %>%
+    pull(pos)
+  return(our_picks_position == 1)
+}
+
+get_odds <- function(theDate, theRace, thePick) {
+  odds <- df %>%
+    filter(date == theDate, racenum == theRace, hnum == thePick) %>%
+    pull(final_odds)
+  return(odds)
+}
+```
+
+
+## Recall betting on the 'normal'
+
+Here we start off with zero dollars, and bet two dollars each race.
+
+```{r}
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- c()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- normal_prediction(theDate, theRace)
+    if (!is.na(pred)) {
+    success <- did_we_win(theDate, theRace, pred)      
+      our_odds <- get_odds(theDate, theRace, pred)
+      incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+      ans <- c(ans, incr)
+    }
+  }
+}
+
+tibble(ans = ans) %>%
+  mutate(n = 1:nrow(.), fortune = cumsum(ans)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = 'Bet the "Normal" Horse'
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+It doesn't go so well.
+
+
+# Applying Kelly's Formula
+
+Kelly's formula requires a non-zero starting fortune, as it's recommendation is to bet a fraction of your current fortune, and if your fortune is zero, well.... So we will start with one hundred dollars.
+
+Also, to start we will assume that we can bet any amount of money, even something like 3.1415926 dollars.
+
+We introduce one new very simple function that calculates the fraction of our wealth that we will bet.
+
+
+```{r}
+kellyFrac <- function( b, p){
+b <- 7
+p <- 1/4
+f <- (p*b+p-1)/b 
+if(f<0){
+  f<-0
+}
+return( f )
+}
+```
+
+Try it out where the odds are 7 to 1, and the probability of our horse winning is 0.25  
+```{r}
+b <- 7
+p <- 1/4
+f <- kellyFrac(b,p)
+```
+
+So we'd bet the fraction `r f` of our fortune.
+
+Now we'll run our (at this point) standard simulations.
+
+But first we have to modify one function. We need normal_prediction to return not only our predicted winner, but the probability of that horse winning.
+
+```{r}
+normal_prediction_prob <- function(this_date, this_race, sims = 100) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  trainingBase <- df %>% filter(hname %in% race_roster$hname, date < theDate)
+  if (nrow(trainingBase) == 0) {
+    return(NA)
+  }
+  if (length(unique(trainingBase$hname)) == 1) {
+    return(NA)
+  }
+  mylm <- lm(finish_time ~ hname - 1, data = trainingBase)
+  db <- mylm %>%
+    tidy() %>%
+    mutate(term = str_sub(term, 6))
+  l <- db %>%
+    filter(is.nan(std.error)) %>%
+    nrow()
+  if (l > 0) {
+    return(NA)
+  }
+  hsn <- nrow(db)
+  z <- replicate(sims, rank(rnorm(hsn, db$estimate, db$std.error)))
+  p1 <- apply(z == 1, 1, sum) / sims
+  p1c <- tibble(p1 = p1)
+  db <- db %>% bind_cols(p1c)
+  db <- db %>%
+    select(term, p1) %>%
+    rename(name = term)
+  pred_name <- db %>%
+    arrange(desc(p1)) %>%
+    head(1) %>%
+    pull(name)
+  our_pick <- race_roster %>%
+    filter(hname == pred_name) %>%
+    pull(hnum)
+  our_prob <- db %>%
+    arrange(desc(p1)) %>%
+    head(1) %>%
+    pull(p1)
+  return(c(our_pick,our_prob))
+}
+```
+
+```{r}
+fortune<-100
+dates <- sort(unique(df$date))
+ld <- length(dates)
+ans <- tibble()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- normal_prediction_prob(theDate, theRace)
+    if (!is.na(pred[1])) {
+      hpred <- pred[1]
+      success <- did_we_win(theDate, theRace, hpred)
+      our_odds <- get_odds(theDate, theRace, hpred)
+      opred<-pred[2]
+      bet<- kellyFrac( our_odds, opred)*fortune
+      incr <- if_else(success, bet * (1 + our_odds), -bet)
+      fortune<-fortune+incr
+      ans<-ans %>% bind_rows(tibble(date=theDate, race=theRace,horse=hpred,win=success,odds=our_odds,prob=opred,bet=bet,incr=incr,fortune=fortune))
+    
+    }
+  }
+}
+
+
+ans%>%
+  mutate(n = 1:nrow(.)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = 'Bet the "Normal Theoretical Kelly" Horse'
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+```
+
+In the above plot, I label it _theoretical_ because the bets made can be any amount. In the following, we will make the simulation more realistic by:  
+- ensuring a bet is at least two dollars, and  
+- rounding any bets off to the nearest dollar  
+
+Note that this will necessarily worsen the results, but is more realistic.
+
+```{r}
+fortune<-100
+dates <- sort(unique(df$date))
+ld <- length(dates)
+ans <- tibble()
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    pred <- normal_prediction_prob(theDate, theRace)
+    if (!is.na(pred[1])) {
+      hpred <- pred[1]
+      success <- did_we_win(theDate, theRace, hpred)
+      our_odds <- get_odds(theDate, theRace, hpred)
+      opred<-pred[2]
+      bet<- kellyFrac( our_odds, opred)*fortune
+      if(bet<2){
+        bet<-0
+      } else{
+        bet<-round(bet)
+      }
+      if(bet>fortune){
+        bet<-0
+      }
+      incr <- if_else(success, bet * (1 + our_odds), -bet)
+      fortune<-fortune+incr
+      ans<-ans %>% bind_rows(tibble(date=theDate, race=theRace,horse=hpred,win=success,odds=our_odds,prob=opred,bet=bet,incr=incr,fortune=fortune))
+    
+    }
+  }
+}
+
+
+ans%>%
+  mutate(n = 1:nrow(.)) %>%
+  ggplot((aes(x = n, y = fortune))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = 'Bet the "Normal Practical Kelly" Horse'
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()
+
+```
+
+Well, that is pretty sad.
+
+# Conclusion
+
+So now we've seen how to apply Kelly's formula. We see why we need probabilities, not just to know the predicted winner, and have seen how to modify Kelly's formula to make it practical. The disappointing results are not a flaw of Kelly's formula (which under the appropriate assumptions is a theorem, i.e. _proved_), but rather of our crappy prediction algorithm.
+
+
