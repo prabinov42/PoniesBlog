@@ -1,0 +1,157 @@
+---
+title: "Ponies: Part 11"
+subtitle: "How accurate do we have to be?"
+author: "Peter Rabinovitch"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: show
+---
+
+# Introduction
+
+In earlier posts we looked at a few different prediction schemes, and then we looked at using Kelly's formula to get an optimal betting strategy. We'll get back to Kelly in a bit, but first there is one question we should address sooner rather than later, and that is how accurate do we have to be to make money? If it turns out that we only have to pick the winner 20% of the time, that is a much easier task than predicting the winner in 90% of the races. So that is what we'll address now.
+
+
+# As always...
+
+```{r, warning = FALSE, message = FALSE, fig.height=10}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(skimr)
+library(janitor)
+library(readr)
+library(ggridges)
+library(broom)
+library(DT)
+```
+
+We'll load the data and apply all the filtering and mutating we did earlier.
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/prabinov42/MiscData/master/horse_racing_data.csv") %>%
+  clean_names() %>%
+  filter(finish_time > 100) %>%
+  mutate(finish_time = floor(finish_time) + 2 * (finish_time - floor(finish_time)))
+
+dts <- df %>%
+  group_by(date) %>%
+  summarize(
+    min_temp = min(temp),
+    max_temp = max(temp)
+  ) %>%
+  mutate(diff_temp = max_temp - min_temp) %>%
+  filter(diff_temp > 0) %>%
+  pull(date)
+
+df <- df %>%
+  filter(!(date %in% dts)) %>%
+  filter(cond != "Heavy")
+```
+
+We still have our old functions, and one (trivial) new one: winner_prediction
+
+```{r}
+random_prediction <- function(this_date, this_race) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_pick <- sample(race_roster$hnum, 1)
+  return(our_pick)
+}
+
+winner_prediction <- function(this_date, this_race) {
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_pick <- race_roster %>% filter(pos==1) %>% pull(hnum)
+  return(our_pick)
+}
+
+did_we_win <- function(this_date, this_race, pred) {
+  if (is.na(pred)) {
+    return(NA)
+  }
+  race_roster <- df %>% filter(date == this_date, racenum == this_race)
+  our_picks_position <- race_roster %>%
+    filter(hnum == pred) %>%
+    pull(pos)
+  return(our_picks_position == 1)
+}
+
+get_odds <- function(theDate, theRace, thePick) {
+  odds <- df %>%
+    filter(date == theDate, racenum == theRace, hnum == thePick) %>%
+    pull(final_odds)
+  return(odds)
+}
+```
+
+
+# How accurate do we have to be?
+
+Here is how we will proceed. In each race we will pick a horse uniformly at random. And in a fraction _p_ of the races we will pick the winner. Of course some of the ones we choose randomly will be winners too, so we shouldn't expect the win probability to be p, but rather something higher. So we will calculate the actual win probability at each level of p.
+
+```{r}
+set.seed(2020)
+
+dates <- sort(unique(df$date))
+ld <- length(dates)
+theBet <- 2
+ans <- tibble()
+pw <- 0.5
+for(pw in c(0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5)){
+samps<-25  #paths
+for(samp in 1:samps){
+  rid<-0
+for (theDate in dates[(ld / 2):ld]) {
+  races <- df %>%
+    filter(date == theDate) %>%
+    pull(racenum) %>%
+    unique() %>%
+    sort()
+  for (theRace in races) {
+    
+    rp <- random_prediction(theDate, theRace)
+    wp <- winner_prediction(theDate, theRace)      
+    if(runif(1)<=pw){
+      pred <- wp
+    } else{
+      pred <- rp
+    }         
+    success <- did_we_win(theDate, theRace, pred)
+    if (!is.na(pred)) {
+      rid<-rid+1
+      our_odds <- get_odds(theDate, theRace, pred)
+      incr <- if_else(success, theBet * (1 + our_odds), -theBet)
+      
+      ans <- ans %>% bind_rows(tibble(date=theDate, race=theRace, rp=rp,wp=wp,pred=pred,win=success,incr=incr, samp=samp, rowid=rid, pw = pw))
+    }
+  }
+}
+}
+}
+
+
+dfw<-ans %>% group_by(pw) %>% summarize(wp = round(mean(win),2))
+ans  %>%
+  group_by(samp, pw)%>%
+  mutate(n = rowid, fortune = cumsum(incr)) %>%
+  left_join(dfw, by = c("pw"="pw"))%>%
+  ggplot((aes(x = n, y = fortune, group=samp))) +
+  geom_line() +
+  labs(
+    x = "Race",
+    y = "Fortune",
+    title = 'How often do we have to win?'
+  ) +
+  scale_y_continuous(label = scales::dollar) +
+  theme_minimal()+
+  facet_wrap(~wp.y)
+```
+
+So it appears that if we can predict the winner about 30% of the time, we should make money. Note that this result should be tempered by the many assumptions and shortcuts we took (eg this is all races, and does nothing about the dnf's we discussed a few weeks ago). But it does put a stick in the ground - we don't have to be 100% accurate, but we can't be complete idiots either.
+
+# Conclusion
+
+We now have a target accuracy - we need to be able to predict roughly 30% of the winners to have a decent chance of making money. This kind of result, a ballpark figure to guide us, is hugely valuable. In data science projects (as in any pother project) it is always important to know when you are done - when the result is good enough. Otherwise it is too easy to spend huge amounts of time seeking epsilons of improvement.
+
+
+
